@@ -526,10 +526,37 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 	}
 
 	// Process the remaining segments until the End Of Image marker.
+	err := d.processSegments(configOnly)
+
+	// Attempt to produce an image regardless of decoding errors
+	if d.progressive {
+		if err := d.reconstructProgressiveImage(); err != nil {
+			return nil, err
+		}
+	}
+	if d.img1 != nil {
+		return d.img1, err
+	}
+	if d.img3 != nil {
+		if d.blackPix != nil {
+			return d.applyBlack()
+		} else if d.isRGB() {
+			return d.convertToRGB()
+		}
+		return d.img3, err
+	}
+	if err == nil {
+		err = FormatError("missing SOS marker")
+	}
+	return nil, err
+}
+
+// processSegments processes the remaining segments until the End Of Image marker
+func (d *decoder) processSegments(configOnly bool) error {
 	for {
 		err := d.readFull(d.tmp[:2])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for d.tmp[0] != 0xff {
 			// Strictly speaking, this is a format error. However, libjpeg is
@@ -555,7 +582,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 			d.tmp[0] = d.tmp[1]
 			d.tmp[1], err = d.readByte()
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		marker := d.tmp[1]
@@ -568,7 +595,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 			// number of fill bytes, which are bytes assigned code X'FF'".
 			marker, err = d.readByte()
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		if marker == eoiMarker { // End Of Image.
@@ -587,11 +614,11 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 		// Read the 16-bit length of the segment. The value includes the 2 bytes for the
 		// length itself, so we subtract 2 to get the number of remaining bytes.
 		if err = d.readFull(d.tmp[:2]); err != nil {
-			return nil, err
+			return err
 		}
 		n := int(d.tmp[0])<<8 + int(d.tmp[1]) - 2
 		if n < 0 {
-			return nil, FormatError("short segment length")
+			return FormatError("short segment length")
 		}
 
 		switch marker {
@@ -599,7 +626,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 			d.progressive = marker == sof2Marker
 			err = d.processSOF(n)
 			if configOnly && d.jfif {
-				return nil, err
+				return err
 			}
 		case dhtMarker:
 			if configOnly {
@@ -615,7 +642,7 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 			}
 		case sosMarker:
 			if configOnly {
-				return nil, nil
+				return nil
 			}
 			err = d.processSOS(n)
 		case driMarker:
@@ -638,27 +665,11 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 			}
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	if d.progressive {
-		if err := d.reconstructProgressiveImage(); err != nil {
-			return nil, err
-		}
-	}
-	if d.img1 != nil {
-		return d.img1, nil
-	}
-	if d.img3 != nil {
-		if d.blackPix != nil {
-			return d.applyBlack()
-		} else if d.isRGB() {
-			return d.convertToRGB()
-		}
-		return d.img3, nil
-	}
-	return nil, FormatError("missing SOS marker")
+	return nil
 }
 
 // applyBlack combines d.img3 and d.blackPix into a CMYK image. The formula
